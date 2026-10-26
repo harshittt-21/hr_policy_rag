@@ -1,11 +1,13 @@
 import logging
+import re
 from typing import Dict, List, Set
-from langsmith import traceable
+
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.vectorstores import VectorStore
+from langsmith import traceable
 
 import config
 from llm_client import get_chat_model
@@ -34,124 +36,200 @@ MULTI_QUERY_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+# Models sometimes add bullets or numbering despite being told not to.
+_LIST_MARKER = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
+
+
+def _clean_variant(line: str) -> str:
+    """Strip list markers and wrapping quotes from one line of LLM output."""
+    line = _LIST_MARKER.sub("", line).strip()
+    return line.strip("\"'` ").strip()
+
 
 def _run_llm_chain(question: str, history: str) -> List[str]:
-    """Internal helper that asks the chat model to rewrite a question.
+    """Ask the chat model to rewrite a question.
 
-    Returns a list of raw lines (including the original question). The caller
-    is responsible for de‑duplicating and trimming.
+    NUM_QUERY_VARIANTS is the TOTAL number of queries searched, including the
+    original question, so the model is asked for one fewer rewrite. With a
+    value of 1 the LLM call is skipped entirely.
+
+    Returns the original question first, followed by unique rewrites.
     """
-    chat = get_chat_model()
-    chain = (
-        MULTI_QUERY_PROMPT
-        | chat
-        | StrOutputParser()
-    )
+    question = question.strip()
+    extra = config.NUM_QUERY_VARIANTS - 1
+    if extra <= 0:
+        return [question]
+
+    chain = MULTI_QUERY_PROMPT | get_chat_model() | StrOutputParser()
     try:
-        raw_output: str = chain.invoke({"question": question, "history": history, "num_variants": config.NUM_QUERY_VARIANTS})
-    except Exception as exc:
+        raw_output: str = chain.invoke(
+            {
+                "question": question,
+                "history": history.strip() or "(none)",
+                "num_variants": extra,
+            }
+        )
+    except Exception:
         logger.exception("LLM failed while generating query variants")
         return [question]
-    # Split into lines, strip empties, keep original question as first entry
-    lines = [ln.strip() for ln in raw_output.splitlines() if ln.strip()]
-    if not lines:
-        return [question]
-    # Ensure the original question is present at the front
-    if lines[0].lower() != question.lower():
-        lines.insert(0, question)
-    else:
-        # make sure we don't have duplicates
-        lines = [question] + [ln for ln in lines if ln.lower() != question.lower()]
-    # Limit to the configured number of variants (including the original)
-    return lines[: config.NUM_QUERY_VARIANTS]
+
+    variants = [question]
+    seen = {question.lower()}
+    for line in raw_output.splitlines():
+        cleaned = _clean_variant(line)
+        if not cleaned or cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        variants.append(cleaned)
+
+    return variants[: config.NUM_QUERY_VARIANTS]
 
 
 def generate_query_variants(question: str, history: str = "") -> List[str]:
-    """Public wrapper that returns a list of query variants.
+    """Return a list of query variants.
 
-    The first element is always the original *question*; subsequent items are
-    LLM‑generated rewrites. If the LLM call fails we fall back to a single‑item
-    list containing only the original question.
+    The first element is always the original question; subsequent items are
+    LLM-generated rewrites. If the LLM call fails we fall back to a
+    single-item list containing only the original question.
     """
     return _run_llm_chain(question, history)
+
+
+# -------------------------------------------------------------------
+# Keyword search (BM25)
+# -------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"\w+")
+
+
+def _tokenize(text: str) -> List[str]:
+    """Lowercase and split on word characters.
+
+    BM25Retriever's default just splits on whitespace, so "Password",
+    "password" and "password?" would all count as different words.
+    """
+    return _TOKEN_RE.findall(text.lower())
 
 
 def build_keyword_retriever(children: List[Document]) -> BM25Retriever:
     """Create a BM25 keyword retriever over the child chunks.
 
-    ``children`` are the small chunks stored in the JSON doc store. The returned
-    retriever is ready to be called with ``search_keywords``.
+    Building the index takes a moment for large corpora, so build it once and
+    reuse it (for example with a cache in the UI) rather than per question.
+    Requires the ``rank_bm25`` package.
     """
-    retriever = BM25Retriever.from_documents(children)
-    # ``k`` is applied later; we just store the default config for reference.
-    retriever.k = config.BM25_TOP_K
-    return retriever
+    if not children:
+        raise ValueError("Cannot build a keyword index without child chunks.")
 
-
-def search_vector_store(store: VectorStore, query: str, k: int) -> List[Document]:
-    """Semantic (embedding) search against the configured vector store.
-
-    Returns up to ``k`` child documents ordered by similarity. Any exception is
-    logged and results in an empty list so the pipeline can continue.
-    """
-    try:
-        return store.similarity_search(query, k=k)
-    except Exception as exc:  # pragma: no cover – defensive
-        logger.exception("Vector store search failed for query %r", query)
-        return []
+    return BM25Retriever.from_documents(
+        children,
+        preprocess_func=_tokenize,
+        k=config.BM25_TOP_K,
+    )
 
 
 def search_keywords(retriever: BM25Retriever, query: str) -> List[Document]:
     """Keyword (BM25) search over the child chunks.
 
-    The BM25 retriever respects its ``k`` attribute; we honour the global
-    ``BM25_TOP_K`` constant for consistency.
+    Only chunks that share at least one word with the query are returned.
+    BM25Retriever on its own always returns k chunks, even when every score
+    is zero, which would feed arbitrary chunks into the fusion step.
     """
-    try:
-        # ``retrieve`` returns a list of Documents already limited to ``k``
-        return retriever.invoke(query)[: config.BM25_TOP_K]
-    except Exception as exc:  # pragma: no cover – defensive
-        logger.exception("BM25 search failed for query %r", query)
+    tokens = retriever.preprocess_func(query)
+    if not tokens:
         return []
+
+    scores = retriever.vectorizer.get_scores(tokens)
+    top_indexes = sorted(
+        range(len(scores)), key=lambda i: scores[i], reverse=True
+    )[: config.BM25_TOP_K]
+
+    return [retriever.docs[i] for i in top_indexes if scores[i] > 0]
+
+
+# -------------------------------------------------------------------
+# Semantic search, fusion and hybrid retrieval
+# -------------------------------------------------------------------
+
+def search_vector_store(store: VectorStore, query: str, k: int) -> List[Document]:
+    """Semantic (embedding) search against the configured vector store.
+
+    Returns up to ``k`` child documents ordered by similarity. Errors are not
+    swallowed here; ``hybrid_retrieve`` decides how to handle them.
+    """
+    return store.similarity_search(query, k=k)
 
 
 def fuse_results(ranked_lists: List[List[Document]], top_k: int) -> List[Document]:
     """Merge several result lists using Reciprocal Rank Fusion (RRF).
 
-    The algorithm assigns a score of ``1 / (60 + rank)`` for each appearance of a
-    document (rank is zero‑based). Documents are de‑duplicated by their
-    ``chunk_id`` metadata; if that key is missing we fall back to the full page
-    content hash.
+    Each appearance of a document scores ``1 / (60 + rank)`` (rank is
+    zero-based). Documents are de-duplicated by their ``chunk_id`` metadata;
+    if that key is missing, the page content is used instead.
     """
     scores: Dict[str, float] = {}
     doc_lookup: Dict[str, Document] = {}
-    for lst in ranked_lists:
-        for rank, doc in enumerate(lst):
+    for ranked in ranked_lists:
+        for rank, doc in enumerate(ranked):
             key = doc.metadata.get("chunk_id") or doc.page_content
             scores[key] = scores.get(key, 0.0) + 1.0 / (60.0 + rank)
-            if key not in doc_lookup:
-                doc_lookup[key] = doc
+            doc_lookup.setdefault(key, doc)
+
     ordered_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
-    fused = [doc_lookup[k] for k in ordered_keys[:top_k]]
-    return fused
+    return [doc_lookup[k] for k in ordered_keys[:top_k]]
 
 
-@traceable(name="hybrid_retrieve")
+# process_inputs keeps the trace small: without it, LangSmith would try to
+# serialise the whole vector store and BM25 index as inputs on every call.
+@traceable(
+    name="hybrid_retrieve",
+    process_inputs=lambda inputs: {"queries": inputs.get("queries")},
+)
 def hybrid_retrieve(
     queries: List[str],
     store: VectorStore,
     keyword_retriever: BM25Retriever,
 ) -> List[Document]:
-    """Run every query through both semantic and keyword search and fuse results.
+    """Run every query through semantic and keyword search and fuse results.
 
-    The final list size respects ``config.HYBRID_TOP_K``.
+    The final list size respects ``config.HYBRID_TOP_K``. If semantic search
+    fails for every query (bad API key, network down) the pipeline carries on
+    with keyword results only and logs a warning. If every single search
+    fails, it raises instead of pretending the documents contain no answer.
     """
-    all_ranked: List[List[Document]] = []
-    for q in queries:
-        all_ranked.append(search_vector_store(store, q, config.VECTOR_TOP_K))
-        all_ranked.append(search_keywords(keyword_retriever, q))
-    return fuse_results(all_ranked, config.HYBRID_TOP_K)
+    ranked: List[List[Document]] = []
+    vector_failures = 0
+    keyword_failures = 0
 
+    for query in queries:
+        try:
+            ranked.append(search_vector_store(store, query, config.VECTOR_TOP_K))
+        except Exception:
+            vector_failures += 1
+            logger.exception("Vector search failed for query %r", query)
+
+        try:
+            ranked.append(search_keywords(keyword_retriever, query))
+        except Exception:
+            keyword_failures += 1
+            logger.exception("Keyword search failed for query %r", query)
+
+    if queries and vector_failures + keyword_failures == 2 * len(queries):
+        raise RuntimeError(
+            "All retrieval searches failed. Check the logs for the underlying errors."
+        )
+
+    if queries and vector_failures == len(queries):
+        logger.warning(
+            "Semantic search failed for every query; results are keyword-only."
+        )
+
+    return fuse_results(ranked, config.HYBRID_TOP_K)
+
+
+# -------------------------------------------------------------------
+# Child -> parent
+# -------------------------------------------------------------------
 
 def record_parent(
     children: List[Document],
@@ -160,18 +238,30 @@ def record_parent(
     """Replace child chunks with their parent documents, deduplicating.
 
     ``parent_lookup`` maps ``parent_id`` strings to the full parent Document.
-    The returned list preserves the order of first appearance of each parent.
+    The result keeps the order in which each parent first appears. If a
+    child's parent cannot be found (for example a stale index), the child
+    itself is used so that relevant text is never silently dropped.
     """
     seen: Set[str] = set()
-    parents: List[Document] = []
+    results: List[Document] = []
+
     for child in children:
         parent_id = child.metadata.get("parent_id")
-        if not parent_id:
+        parent_doc = parent_lookup.get(parent_id) if parent_id else None
+
+        if parent_doc is None:
+            logger.warning(
+                "No parent found for chunk %s; using the chunk itself.",
+                child.metadata.get("chunk_id", "?"),
+            )
+            parent_doc = child
+            key = child.metadata.get("chunk_id") or child.page_content
+        else:
+            key = parent_id
+
+        if key in seen:
             continue
-        if parent_id in seen:
-            continue
-        parent_doc = parent_lookup.get(parent_id)
-        if parent_doc:
-            parents.append(parent_doc)
-            seen.add(parent_id)
-    return parents
+        seen.add(key)
+        results.append(parent_doc)
+
+    return results
