@@ -1,0 +1,52 @@
+# HR Policy Assistant RAG — stable modern dependency set
+# Recommended Python: 3.11 or 3.12
+#
+# Install:
+#   python -m pip install --upgrade pip
+#   pip install -r requirements.txt
+#
+# Architecture:
+#   LLM: Groq via langchain-groq
+#   Embeddings: Jina API (called with requests)
+#   Vector database: Qdrant Cloud via langchain-qdrant
+#   Optional local vector store: FAISS
+#   Reranking: simple keyword overlap (no PyTorch / sentence-transformers)
+
+# LangChain 1.x core and integrations
+langchain>=1.4.6,<2.0.0
+langchain-core>=1.4.7,<2.0.0
+langchain-community>=0.4.2,<1.0.0
+langchain-text-splitters>=1.1.3,<2.0.0
+langchain-groq>=1.1.3,<2.0.0
+langchain-qdrant>=1.1.0,<2.0.0
+
+# Qdrant Cloud client
+qdrant-client>=1.19.1,<2.0.0
+
+# Optional local vector store / fallback
+faiss-cpu>=1.8.0
+
+# Jina Embeddings API (REST requests; no local embedding model required)
+requests>=2.32.0,<3.0.0
+
+# Hybrid retrieval: keyword / BM25 search
+rank-bm25>=0.2.2,<1.0.0
+
+# Document loading and parsing
+pypdf>=5.0.0
+docx2txt>=0.8
+python-docx>=1.1.0
+
+# Streamlit UI
+streamlit>=1.66.1,<2.0.0
+
+# Environment configuration
+python-dotenv>=1.0.1,<2.0.0
+
+# Optional sample PDF generation
+reportlab>=4.2.0,<5.0.0
+
+# Tests
+pytest>=8.0.0,<10.0.0
+
+dotenv

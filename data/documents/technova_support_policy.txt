@@ -1,0 +1,102 @@
+TECHNOVA CUSTOMER SUPPORT POLICY
+Document ID: TN-SUP-2024
+Last updated: 12 March 2024
+
+1. PURPOSE
+
+This policy explains how TechNova Solutions provides technical support to
+customers of the NovaCloud platform. It covers support hours, response times,
+escalation, refunds and account cancellation.
+
+2. SUPPORT PLANS
+
+TechNova offers three support plans.
+
+Starter Support is included free with every NovaCloud subscription. It covers
+email support during business hours and access to the public documentation
+portal.
+
+Business Support costs 199 USD per month. It adds live chat, a four hour
+first-response target and up to five named support contacts.
+
+Enterprise Support is priced per contract. It adds 24/7 phone support, a
+dedicated Technical Account Manager, a one hour first-response target for
+critical issues and quarterly architecture reviews.
+
+3. SUPPORT HOURS
+
+Business hours are 09:00 to 18:00 local time, Monday to Friday, in three
+regions: Americas (Austin), Europe (Dublin) and Asia Pacific (Singapore).
+Enterprise Support customers may raise critical (Priority 1) tickets at any
+time, including weekends and public holidays.
+
+4. PRIORITY LEVELS AND RESPONSE TARGETS
+
+Priority 1 means production is down for all users. First response is one hour
+for Enterprise, four hours for Business and one business day for Starter.
+
+Priority 2 means a major feature is unusable but a workaround exists. First
+response is four hours for Enterprise, eight hours for Business and two
+business days for Starter.
+
+Priority 3 covers questions, configuration help and feature requests. First
+response is one business day for Enterprise and Business, and three business
+days for Starter.
+
+Response targets describe the first human reply, not the time to resolve the
+issue. Resolution times vary with the complexity of the problem.
+
+5. REFUND POLICY
+
+Customers on monthly self-service plans may request a full refund within 30
+days of the original purchase date. Refunds are issued to the original payment
+method and normally appear within 10 business days.
+
+Annual self-service subscriptions can be refunded on a pro-rata basis for the
+unused whole months remaining in the term, minus a 10 percent administration
+fee.
+
+Enterprise contracts are not covered by the standard 30 day refund window.
+Enterprise refunds follow the termination clause of the signed Master Service
+Agreement, which normally allows termination for convenience with 60 days
+written notice and a pro-rata credit for prepaid, unused service.
+
+Usage-based charges, such as additional storage or data transfer, are never
+refundable because the underlying infrastructure cost has already been
+incurred.
+
+6. HOW TO REQUEST A REFUND
+
+Email billing@technova.example with the account name, the invoice number and
+the reason for the request. The billing team confirms receipt within two
+business days. Requests made after the 30 day window are reviewed case by case
+and may be issued as service credit instead of cash.
+
+7. CANCELLATION
+
+Self-service customers can cancel at any time from the Billing page in the
+NovaCloud console. Access continues until the end of the paid period. Account
+data is retained for 30 days after cancellation and is then permanently
+deleted.
+
+8. ESCALATION
+
+If a ticket is not progressing, customers may reply to the ticket with the
+word ESCALATE. This notifies the duty support manager. Enterprise customers
+can also contact their Technical Account Manager directly. The escalation path
+is Support Engineer, then Duty Support Manager, then Director of Customer
+Support.
+
+9. SERVICE CREDITS
+
+If the monthly uptime of NovaCloud falls below 99.9 percent, affected
+customers may claim service credits: 10 percent of the monthly fee for uptime
+between 99.0 and 99.9 percent, and 25 percent for uptime below 99.0 percent.
+Credit claims must be submitted within 30 days of the end of the affected
+month.
+
+10. OUT OF SCOPE
+
+TechNova Support does not write custom application code, debug third-party
+software or provide formal training. Those services are available through
+TechNova Professional Services at an additional cost.
