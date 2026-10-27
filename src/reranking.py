@@ -161,6 +161,7 @@ def rerank_documents(
     # sorted() is stable, so equal scores keep their retrieval order.
     ranked = sorted(zip(documents, scores), key=lambda pair: pair[1], reverse=True)
 
+
     kept: List[Document] = []
     for doc, score in ranked:
         if score <= min_score:

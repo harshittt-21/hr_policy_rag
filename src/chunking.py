@@ -1,3 +1,4 @@
+
 import re
 import uuid
 from typing import Dict, List, Tuple
@@ -7,6 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import config
 
+
 # Words that may stay lowercase inside a Title Case heading ("Use of AI").
 _SMALL_WORDS = {
     "a", "an", "and", "as", "at", "but", "by", "for", "in",
@@ -14,29 +16,20 @@ _SMALL_WORDS = {
 }
 
 
-def make_splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
+def make_splitter(
+    chunk_size: int,
+    chunk_overlap: int,
+) -> RecursiveCharacterTextSplitter:
     """
     Build a text splitter that tries to cut text at meaningful boundaries.
 
-    "Meaning-aware" splitting here means the splitter prefers to break at a
-    paragraph break, then at a line break, then at the end of a sentence, and
-    only chops mid-word as a last resort. That keeps ideas intact inside a
-    chunk instead of slicing a sentence in half.
-
-    Args:
-        chunk_size: Target chunk length in characters.
-        chunk_overlap: How many characters neighbouring chunks share, so a
-            sentence sitting on a boundary is not lost.
-
-    Returns:
-        A configured RecursiveCharacterTextSplitter.
+    The splitter prefers paragraph breaks, then line breaks, sentence
+    boundaries, and finally spaces or individual characters.
     """
     return RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", ". ", "! ", "? ", "; ", " ", ""],
-        # Keep the punctuation with the sentence it ends, instead of
-        # letting the next chunk start with ". ".
         keep_separator="end",
         length_function=len,
     )
@@ -45,101 +38,134 @@ def make_splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterText
 def _is_title_case(text: str) -> bool:
     """True if every word is capitalised, apart from small words like 'of'."""
     words = text.split()
+
     if not words or not words[0][0].isupper():
         return False
+
     return all(
-        w[0].isupper() or w.lower() in _SMALL_WORDS or not w[0].isalpha()
-        for w in words
+        word[0].isupper()
+        or word.lower() in _SMALL_WORDS
+        or not word[0].isalpha()
+        for word in words
     )
 
 
-def guess_section(text: str) -> str:
+def _heading_of(line: str) -> str:
     """
-    Guess the section heading a piece of text belongs to.
+    Return a heading if a line looks like one; otherwise return an empty string.
 
-    Policy documents are written as "Password Policy", "Refund Policy" and so
-    on. Capturing that heading lets a citation say "Section: Password Policy",
-    which is far more useful to a reader than a filename alone.
-
-    Args:
-        text: A chunk of document text.
-
-    Returns:
-        The heading we found, or an empty string if the text has no obvious
-        heading. We deliberately keep this simple: a wrong guess only affects
-        the citation label, never the answer itself.
+    Recognises uppercase headings, Title Case headings, and numbered headings
+    such as '4. Password Policy' or '4.2 Account Security'.
     """
-    number_prefix = r"^\d+(\.\d+)*[.)]?\s+"
+    line = line.strip()
 
-    for raw_line in text.split("\n")[:15]:
-        line = raw_line.strip()
+    # Headings should be reasonably short and should not look like sentences.
+    if not (3 < len(line) <= 70):
+        return ""
 
-        # A heading is short, has a handful of words and does not end like a
-        # sentence. "4. PASSWORD POLICY" passes; "We reset passwords." fails.
-        if not (3 < len(line) <= 70) or line.endswith((".", ",", ";", ":")):
-            continue
-        if len(line.split()) > 8:
-            continue
+    if line.endswith((".", ",", ";", ":")):
+        return ""
 
-        # Strip a leading number so "4. Password Policy" becomes
-        # "Password Policy", then judge the heading text itself. Judging the
-        # text (not just the number) stops list items such as
-        # "3. Use strong passwords" from being mistaken for headings.
-        heading = re.sub(number_prefix, "", line).strip()
-        if not heading:
-            continue
+    if len(line.split()) > 8:
+        return ""
 
-        if heading.isupper() or _is_title_case(heading):
-            return heading
+    # Remove a leading section number before checking the heading text.
+    number_prefix = r"^\d+(?:\.\d+)*[.)]?\s+"
+    heading = re.sub(number_prefix, "", line).strip()
+
+    if not heading:
+        return ""
+
+    if heading.isupper() or _is_title_case(heading):
+        return heading
 
     return ""
 
 
+def find_headings(text: str) -> List[Tuple[int, str]]:
+    """
+    Find headings and their character offsets in a text block.
+
+    Returns:
+        A list of (offset, heading) pairs, ordered by position.
+    """
+    headings: List[Tuple[int, str]] = []
+    offset = 0
+
+    for raw_line in text.split("\n"):
+        heading = _heading_of(raw_line)
+
+        if heading:
+            headings.append((offset, heading))
+
+        # Include the newline character in the offset calculation.
+        offset += len(raw_line) + 1
+
+    return headings
+
+
+def _is_document_title(heading: str, filename: str) -> bool:
+    """
+    Avoid treating a document's filename or year-bearing title as a section.
+
+    The year check is intentionally conservative in implementation scope:
+    headings containing a four-digit year are excluded from section labels.
+    """
+    filename_stem = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    filename_stem = re.sub(r"\.[^.]+$", "", filename_stem)
+
+    normalise = lambda value: re.sub(
+        r"[^a-z0-9]+", " ", value.lower()
+    ).strip()
+
+    if filename_stem and normalise(heading) == normalise(filename_stem):
+        return True
+
+    if re.search(r"\b(?:19|20)\d{2}\b", heading):
+        return True
+
+    return False
+
+
 def make_point_id(chunk_id: str) -> str:
     """
-    Turn a readable chunk id into a stable UUID.
+    Turn a readable chunk ID into a stable UUID.
 
-    Qdrant only accepts unsigned integers or UUIDs as point ids, so
-    "handbook.pdf::3::2" cannot be used directly. The same chunk_id always
-    produces the same UUID, which keeps re-indexing idempotent.
+    Qdrant accepts UUIDs as point IDs. The same chunk ID always produces
+    the same UUID, keeping re-indexing idempotent.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
 
 
-def split_documents(documents: List[Document]) -> Tuple[List[Document], List[Document]]:
+def split_documents(
+    documents: List[Document],
+) -> Tuple[List[Document], List[Document]]:
     """
     Turn loaded documents into large parent chunks and small child chunks.
 
-    This is the core of parent-child retrieval. Each child carries a
-    `parent_id` in its metadata, which is the link we follow later to recover
-    the bigger context.
-
-    Args:
-        documents: Cleaned documents from `src.ingestion`.
+    Each child carries a parent_id linking it to its parent. Section labels
+    are assigned per child using the last heading before that child's
+    position in the parent text.
 
     Returns:
-        A tuple `(parents, children)`:
-            parents  - large chunks, used as the context given to the LLM.
-            children - small chunks, the ones we actually embed and search.
-
-    Example:
-        A 5-page handbook may produce 12 parents and 48 children. Searching
-        finds child #37; the LLM reads parent "handbook.pdf::8" instead.
+        A tuple of (parents, children).
     """
-    parent_splitter = make_splitter(config.PARENT_CHUNK_SIZE, config.PARENT_CHUNK_OVERLAP)
-    child_splitter = make_splitter(config.CHILD_CHUNK_SIZE, config.CHILD_CHUNK_OVERLAP)
+    parent_splitter = make_splitter(
+        config.PARENT_CHUNK_SIZE,
+        config.PARENT_CHUNK_OVERLAP,
+    )
+    child_splitter = make_splitter(
+        config.CHILD_CHUNK_SIZE,
+        config.CHILD_CHUNK_OVERLAP,
+    )
 
     parents: List[Document] = []
     children: List[Document] = []
 
-    # We count parents separately for each file. Numbering per file (rather
-    # than across the whole batch) means a chunk always gets the same id no
-    # matter which other documents were processed alongside it - which is what
-    # lets `update_index` recognise and skip a file it has already indexed.
+    # Number parents independently for each file to keep IDs stable.
     parents_per_file: Dict[str, int] = {}
 
-    # The last heading seen in each file. A parent that starts mid-section
-    # has no heading of its own, so it inherits the previous one.
+    # The latest section heading seen in each file.
     current_section: Dict[str, str] = {}
 
     for document in documents:
@@ -148,39 +174,89 @@ def split_documents(documents: List[Document]) -> Tuple[List[Document], List[Doc
         for parent_text in parent_splitter.split_text(document.page_content):
             parent_number = parents_per_file.get(filename, 0)
             parents_per_file[filename] = parent_number + 1
+
             parent_id = f"{filename}::{parent_number}"
 
-            section = guess_section(parent_text) or current_section.get(filename, "")
-            current_section[filename] = section
+            inherited = current_section.get(filename, "")
+
+            # Find headings and their positions within this parent.
+            headings = [
+                (offset, heading)
+                for offset, heading in find_headings(parent_text)
+                if not _is_document_title(heading, filename)
+            ]
+
+            # A parent inherits the previous section if it has no headings.
+            # Otherwise, its metadata records the last heading in the parent.
+            section = headings[-1][1] if headings else inherited
 
             parent_metadata = dict(document.metadata)
             parent_metadata["parent_id"] = parent_id
             parent_metadata["section"] = section
 
-            parents.append(Document(page_content=parent_text, metadata=parent_metadata))
+            parents.append(
+                Document(
+                    page_content=parent_text,
+                    metadata=parent_metadata,
+                )
+            )
 
-            for child_index, child_text in enumerate(child_splitter.split_text(parent_text)):
+            child_texts = child_splitter.split_text(parent_text)
+
+            # Child chunks can overlap. Search from the previous match's
+            # starting position + 1 rather than its ending position, so
+            # overlapping chunks can still be located.
+            search_from = 0
+
+            for child_index, child_text in enumerate(child_texts):
+                pos = parent_text.find(child_text, search_from)
+
+                if pos == -1:
+                    # Defensive fallback for text altered by a splitter.
+                    pos = max(search_from, 0)
+                else:
+                    search_from = pos + 1
+
+                # Start with the inherited section, then apply every heading
+                # that occurs before this child's starting position.
+                child_section = inherited
+
+                for offset, heading in headings:
+                    if offset > pos:
+                        break
+
+                    child_section = heading
+
                 chunk_id = f"{parent_id}::{child_index}"
+
                 child_metadata = dict(parent_metadata)
                 child_metadata["chunk_id"] = chunk_id
                 child_metadata["point_id"] = make_point_id(chunk_id)
-                children.append(Document(page_content=child_text, metadata=child_metadata))
+                child_metadata["section"] = child_section
+
+                children.append(
+                    Document(
+                        page_content=child_text,
+                        metadata=child_metadata,
+                    )
+                )
+
+            # Carry the last heading forward to the next parent.
+            current_section[filename] = section
 
     return parents, children
 
 
-def build_parent_lookup(parents: List[Document]) -> Dict[str, Document]:
+def build_parent_lookup(
+    parents: List[Document],
+) -> Dict[str, Document]:
     """
-    Build a dictionary that maps a parent_id to its parent Document.
+    Build a dictionary mapping each parent_id to its parent Document.
 
-    Retrieval gives us child chunks; we need an instant way to fetch the
-    matching parent. A dictionary lookup is O(1), which is as simple and fast
-    as this problem needs to be.
-
-    Args:
-        parents: The list of parent chunks.
-
-    Returns:
-        A dictionary like {"handbook.pdf::3": Document(...), ...}.
+    Dictionary lookup is O(1), making it efficient to retrieve parent
+    context after searching child chunks.
     """
-    return {parent.metadata["parent_id"]: parent for parent in parents}
+    return {
+        parent.metadata["parent_id"]: parent
+        for parent in parents
+    }

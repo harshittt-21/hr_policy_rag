@@ -322,6 +322,23 @@ _NUMBER_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# -------------------------------------------------------------------
+# Answer cleaning
+# -------------------------------------------------------------------
+
+_ANSWER_FIXES = str.maketrans({
+    "【": "[", "】": "]",
+    "\u2010": "-", "\u2011": "-",
+    "\u2019": "'", "\u2018": "'",
+    "\u00a0": " ", "\u202f": " ",
+})
+
+
+def normalize_answer(text: str) -> str:
+    """Fix model typography quirks so citation and not-found checks work."""
+    text = (text or "").translate(_ANSWER_FIXES)
+    return unicodedata.normalize("NFKC", text)
+
 
 def strip_citations(text: str) -> str:
     """Remove [1]-style markers. Used before storing answers in chat memory."""
@@ -433,7 +450,7 @@ def check_output(
         citation numbers removed. When not allowed, `message` is a safe reply
         to show instead, and the sources can still be shown to the user.
     """
-    text = (answer or "").strip()
+    text =  normalize_answer(answer or "").strip()
     if not text:
         return GuardResult(False, message=EMPTY_ANSWER_MESSAGE, reason="empty_answer")
 
